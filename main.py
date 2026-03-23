@@ -3,122 +3,149 @@ import requests
 import csv
 import sys
 import time
+import os
+
+def read_secret_file(filename):
+    if not os.path.exists(filename):
+        print(f"[!] Error: The file '{filename}' was not found.")
+        sys.exit(1)
+    with open(filename, "r", encoding="utf-8") as f:
+        return f.read().strip()
 
 def scrape_courses(args):
-    # The endpoint identified from syllabus.js
-    endpoint_url = f"{args.base_url.rstrip('/')}/Syllabus/List"
-    # endpoint_url = ""
+    cookie_data = read_secret_file("cookies")
+    csrf_token_data = read_secret_file("csrf-token")
+
+    endpoint_url = "https://syllabus.sharjah.ac.ae/Syllabus/List"
     
-    # Headers required to bypass authentication and CSRF protection
+    # Matching the exact headers from your cURL command
     headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-        "Cookie": args.cookie,
-        "RequestVerificationToken": args.csrf_token,
+        "Accept": "application/json, text/javascript, */*; q=0.01",
+        "Accept-Language": "en-US,en;q=0.5",
+        "Cache-Control": "no-cache",
+        "Connection": "keep-alive",
+        "Content-Type": "application/x-www-form-urlencoded; charset=UTF-8",
+        "Cookie": cookie_data,
+        "DNT": "1",
+        "Origin": "https://syllabus.sharjah.ac.ae",
+        "Referer": "https://syllabus.sharjah.ac.ae/Syllabus",
+        "RequestVerificationToken": csrf_token_data,
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/146.0.0.0 Safari/537.36",
         "X-Requested-With": "XMLHttpRequest"
     }
 
-    # CSV setup
+    # CSV headers
     fieldnames = [
-        "SyllabusCode", "TermCode", "TermName", "CollegeCode", "College", 
-        "DepartmentCode", "DepartmentName", "CourseCode", "Course", 
-        "CourseSection", "CRN", "Faculty", "StatusText"
+        "SyllabusCode", "TermCode", "CollegeCode", "DepartmentCode", 
+        "CourseCode", "Course", "CourseSection", "CRN", "Faculty", "Status"
     ]
     
     all_records = []
     start = 0
-    length = 100 # Batch size
+    length = 100 # Batch size (changed from 5 to 100 to speed up scraping)
     draw = 1
     total_records = None
 
-    print(f"[*] Starting scrape for Term: {args.term_id}...")
+    print(f"[*] Starting scrape for Term ID: {args.term_id}...")
 
     while True:
-        # Construct the payload mimicking the DataTables POST request from syllabus.js
+        # Base payload
         payload = {
-            "draw": draw,
-            "start": start,
-            "length": length,
+            "draw": str(draw),
+            "start": str(start),
+            "length": str(length),
+            "search[value]": "",
+            "search[regex]": "false",
+            "order[0][column]": "4",
+            "order[0][dir]": "asc",
             "termId": args.term_id,
-            "collegeId": args.college_id,
-            "courseId": args.course_id,
-            "keyword": args.keyword,
-            "status": args.status,
-            "myRecordsOnly": "false" # Force false to get all organization records, not just the user's
+            "collegeId": "",
+            "keyword": "",
+            "status": "",
+            "myRecordsOnly": "false" # Set to false to get ALL courses, not just yours
         }
 
+        # The strict column schema required by the server (Extracted from your cURL)
+        columns = [
+            "Id", "SyllabusId", "SyllabusCode", "TermCode", "CollegeCode",
+            "DepartmentCode", "CourseCode", "Course", "CourseSection", "CRN",
+            "Faculty", "Status", "11"
+        ]
+
+        for i, col in enumerate(columns):
+            payload[f"columns[{i}][data]"] = col
+            payload[f"columns[{i}][name]"] = ""
+            payload[f"columns[{i}][searchable]"] = "true"
+            payload[f"columns[{i}][orderable]"] = "true"
+            payload[f"columns[{i}][search][value]"] = ""
+            payload[f"columns[{i}][search][regex]"] = "false"
+
         try:
-            response = requests.post(endpoint_url, headers=headers, data=payload)
+            response = requests.post(
+                endpoint_url, 
+                headers=headers, 
+                data=payload,
+                allow_redirects=False
+            )
+            
+            if response.status_code in (301, 302):
+                print(f"[!] Server redirected us to: {response.headers.get('Location')}")
+                sys.exit(1)
+
             response.raise_for_status()
             data = response.json()
+
         except requests.exceptions.RequestException as e:
             print(f"[!] Request failed: {e}")
             sys.exit(1)
         except ValueError:
-            print("[!] Failed to parse JSON. Your session cookie or CSRF token might be invalid/expired.")
+            print("[!] Failed to parse JSON. Raw response snippet:")
+            print(response.text[:500])
             sys.exit(1)
 
         records = data.get("data", [])
         if not records:
-            break # No more records returned
+            break 
 
         if total_records is None:
             total_records = data.get("recordsFiltered", data.get("recordsTotal", "Unknown"))
             print(f"[*] Found approximately {total_records} total records. Fetching...")
 
         for row in records:
-            # Flatten the nested values for the CSV
             all_records.append({
                 "SyllabusCode": row.get("SyllabusCode", ""),
                 "TermCode": row.get("TermCode", ""),
-                "TermName": row.get("TermName", ""),
                 "CollegeCode": row.get("CollegeCode", ""),
-                "College": row.get("College", ""),
                 "DepartmentCode": row.get("DepartmentCode", ""),
-                "DepartmentName": row.get("DepartmentName", ""),
+                "Course": row.get("Course", ""), 
                 "CourseCode": row.get("CourseCode", ""),
-                "Course": row.get("Course", ""),
                 "CourseSection": row.get("CourseSection", ""),
                 "CRN": row.get("CRN", ""),
                 "Faculty": row.get("Faculty", ""),
-                "StatusText": row.get("StatusText", "")
+                "Status": row.get("Status", "")
             })
 
         print(f"    -> Fetched records {start + 1} to {start + len(records)}...")
         
         start += length
         draw += 1
-        time.sleep(0.5) # Gentle polite delay between pagination requests
+        time.sleep(0.5)
 
         if len(records) < length:
-            break # Reached the last page
+            break
 
-    # Save to CSV
     if all_records:
         with open(args.output, mode="w", newline="", encoding="utf-8") as file:
-            writer = csv.DictWriter(file, fieldnames=fieldnames)
+            writer = csv.DictWriter(file, fieldnames=fieldnames, extrasaction='ignore')
             writer.writeheader()
             writer.writerows(all_records)
         print(f"[*] Successfully saved {len(all_records)} courses to '{args.output}'.")
     else:
-        print("[*] No courses found matching your criteria.")
+        print("[*] No courses found.")
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Scrape offered courses for a given semester from the portal.")
-    
-    # Required parameters based on server security
-    parser.add_argument("--base-url", required=True, help="Base URL of the application (e.g., https://portal.sharjah.ac.ae)")
-    parser.add_argument("--cookie", required=True, help="Your active session cookie string (from browser dev tools)")
-    parser.add_argument("--csrf-token", required=True, help="The __RequestVerificationToken value (from browser dev tools or page source)")
-    
-    # Filtering parameters from LoadSyllabusList in syllabus.js
-    parser.add_argument("--term-id", required=True, help="Target Semester/Term ID (e.g., 202410)")
-    parser.add_argument("--college-id", default="", help="Optional: Filter by College ID")
-    parser.add_argument("--course-id", default="", help="Optional: Filter by Course ID")
-    parser.add_argument("--status", default="", help="Optional: Filter by Syllabus Status ID (e.g., approved, draft)")
-    parser.add_argument("--keyword", default="", help="Optional: Search keyword")
-    
-    # Output parameter
-    parser.add_argument("--output", default="offered_courses.csv", help="Output CSV filename (default: offered_courses.csv)")
-
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--term-id", required=True, help="Target Semester/Term ID")
+    parser.add_argument("--output", default="offered_courses.csv")
     args = parser.parse_args()
     scrape_courses(args)
